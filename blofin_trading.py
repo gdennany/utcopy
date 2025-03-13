@@ -20,7 +20,6 @@ ORDER_USD_AMOUNT = os.getenv("ORDER_USD_AMOUNT")
 ROOT_URL = os.getenv("BLOFIN_ROOT_URL")
 WS_URL = os.getenv("BLOFIN_WS_URL")
 
-
 def generate_ws_signature(timestamp: str, nonce: str) -> str:
     """
     Generate signature for WebSocket authentication.
@@ -33,6 +32,7 @@ def generate_ws_signature(timestamp: str, nonce: str) -> str:
     method = "GET"
     msg = f"{path}{method}{timestamp}{nonce}"
     hex_signature = hmac.new(SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest().encode()
+
     return base64.b64encode(hex_signature).decode()
 
 async def sign_and_login(ws) -> None:
@@ -55,6 +55,7 @@ async def sign_and_login(ws) -> None:
     await ws.send(json.dumps(login_payload))
     response = await ws.recv()
 
+
 def generate_rest_signature(path: str, method: str, timestamp: str, nonce: str, body: str) -> str:
     """
     Generate the signature for the REST API.
@@ -63,6 +64,52 @@ def generate_rest_signature(path: str, method: str, timestamp: str, nonce: str, 
     msg = f"{path}{method.upper()}{timestamp}{nonce}{body}"
     hex_signature = hmac.new(SECRET.encode('utf-8'), msg.encode('utf-8'), hashlib.sha256).hexdigest().encode('utf-8')
     return base64.b64encode(hex_signature).decode()
+
+def set_leverage(instId: str) -> dict:
+    """
+    Set the leverage for the given instrument. Using cross margin mode so
+    marginMode is always "cross" and positionSide is "net".
+    
+    Example payload:
+    {
+        "instId": "BTC-USDT",
+        "leverage": "5",
+        "marginMode": "cross",
+        "positionSide": "net"
+    }
+    """
+    payload = {
+        "instId": instId,
+        "leverage": LEVERAGE,
+        "marginMode": "cross"
+    }
+
+    body = json.dumps(payload)
+    path = "/api/v1/account/set-leverage"
+    method = "POST"
+    timestamp = str(int(time.time() * 1000))
+    nonce = timestamp  # Using timestamp as nonce for simplicity
+    signature = generate_rest_signature(path, method, timestamp, nonce, body)
+    
+    headers = {
+        "ACCESS-KEY": API_KEY,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-NONCE": nonce,
+        "ACCESS-PASSPHRASE": PASSPHRASE,
+        "Content-Type": "application/json"
+    }
+
+    url = ROOT_URL + path
+    response = requests.post(url, headers=headers, json=payload)
+    response.raise_for_status()
+    leverage_response = response.json()
+
+    if "code" in leverage_response and leverage_response["code"] != "0":
+        raise Exception(f"Set leverage error: {leverage_response}")
+
+    return leverage_response
+
 
 def place_rest_order(signal: dict) -> dict:
     """
@@ -106,13 +153,13 @@ def place_rest_order(signal: dict) -> dict:
 
     # Calculate order size from desired USD amount and leverage:
     usd_amount = float(ORDER_USD_AMOUNT)
-    leverage = float(LEVERAGE)
-    notional = usd_amount * leverage
+    leverage_val = float(LEVERAGE)
+    notional = usd_amount * leverage_val
     order_size = notional / entry_price  # Number of tokens/contracts
-
+    
     order_request = {
         "instId": instId,
-        "marginMode": "cross",
+        "marginMode": "cross", 
         "side": side,
         "orderType": "limit",
         "price": str(entry_price),
@@ -121,9 +168,10 @@ def place_rest_order(signal: dict) -> dict:
         "slOrderPrice": "-1",
         "tpTriggerPrice": str(take_profit),
         "tpOrderPrice": "-1",
-        "leverage": str(int(leverage)),
-        "positionSide": "net",
+        "leverage": str(int(leverage_val)),
+        "positionSide": "net"
     }
+
     body = json.dumps(order_request)
     path = "/api/v1/trade/order"
     method = "POST"
@@ -141,16 +189,17 @@ def place_rest_order(signal: dict) -> dict:
     }
 
     url = ROOT_URL + path
-    print("Placing order with payload:")
-    print(json.dumps(order_request, indent=2))
     response = requests.post(url, headers=headers, json=order_request)
     response.raise_for_status()
     order_response = response.json()
+    
     if "code" in order_response and order_response["code"] != "0":
         raise Exception(f"Order API error: {order_response}")
     if "data" not in order_response:
         raise Exception(f"No data in order response: {order_response}")
+
     return order_response
+
 
 async def wait_for_order_confirmation(ws, order_id: str, timeout: int = 10) -> dict:
     """
@@ -169,17 +218,28 @@ async def wait_for_order_confirmation(ws, order_id: str, timeout: int = 10) -> d
     except asyncio.TimeoutError:
         raise Exception("Timeout waiting for order confirmation.")
 
+
 async def trading_workflow(signal: dict):
     """
     Complete trading workflow using a Telegram signal.
     """
-    # 1. Connect to WebSocket and authenticate
+    
+    # Determine instrument from signal
+    instId = f"{signal.get('ticker').upper()}-USDT"
+    
+    # 1. Set the desired leverage (always using cross margin mode)
+    try:
+        set_leverage(instId)
+    except Exception as e:
+        raise Exception("Set leverage failed:", e)
+        # Depending on your strategy, you may choose to continue or abort here.
+    
+    # 2. Connect to WebSocket and authenticate
     ws = await websockets.connect(WS_URL)
     await sign_and_login(ws)
     await asyncio.sleep(1)
     
-    # 2. Subscribe to orders channel for the instrument from the signal
-    instId = f"{signal.get('ticker').upper()}-USDT"
+    # 3. Subscribe to orders channel for the instrument from the signal
     subscribe_payload = {
         "op": "subscribe",
         "args": [{"channel": "orders", "instId": instId}]
@@ -187,32 +247,31 @@ async def trading_workflow(signal: dict):
     await ws.send(json.dumps(subscribe_payload))
     sub_response = await ws.recv()
     
-    # 3. Place limit order via REST using the signal details
+    # 4. Place limit order via REST using the signal details
     order_response = place_rest_order(signal)
     order_id = order_response["data"][0]["orderId"]
     
-    # 4. Wait for order confirmation via WebSocket
+    # 5. Wait for order confirmation via WebSocket
     try:
         order_update = await wait_for_order_confirmation(ws, order_id)
-        print("Order confirmed")
+        print("Order placed.")
     except Exception as e:
-        print("Order failed")
-        print(str(e))
-
-  
+        print("Order failed: ", e)
+    
     print('------------------------------------------------------------------------------------')
     
-    # (Optional) 5. Order cancellation code can be added similarly.
+    # (Optional) 6. Order cancellation logic.
     
     # Clean up WebSocket connection
     await ws.close()
+
 
 if __name__ == "__main__":
     # Example Telegram signal parsed from a message:
     telegram_signal = {
         "ticker": "SOL",
         "trade_type": "LONG",
-        "entry": [122.34],
+        "entry": [123.99],
         "targets": [200],
         "stoploss": 80
     }
