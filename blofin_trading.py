@@ -172,6 +172,9 @@ def place_rest_order(signal: dict) -> dict:
         "positionSide": "net"
     }
 
+    print("Placing order with payload:")
+    print(json.dumps(order_request, indent=2))
+
     body = json.dumps(order_request)
     path = "/api/v1/trade/order"
     method = "POST"
@@ -245,7 +248,7 @@ async def trading_workflow(signal: dict):
         "args": [{"channel": "orders", "instId": instId}]
     }
     await ws.send(json.dumps(subscribe_payload))
-    sub_response = await ws.recv()
+    await ws.recv()
     
     # 4. Place limit order via REST using the signal details
     order_response = place_rest_order(signal)
@@ -253,7 +256,7 @@ async def trading_workflow(signal: dict):
     
     # 5. Wait for order confirmation via WebSocket
     try:
-        order_update = await wait_for_order_confirmation(ws, order_id)
+        await wait_for_order_confirmation(ws, order_id)
         print("Order placed.")
     except Exception as e:
         print("Order failed: ", e)

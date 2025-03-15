@@ -1,7 +1,5 @@
 import os
 import asyncio
-import time
-from datetime import datetime
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
 from signal_parser import parse_signal
@@ -30,7 +28,7 @@ async def message_handler(event):
         parsed_signal.get('stoploss') is not None):
         print("All required fields found. Creating Order...")
         # Launch the trading workflow as a background task
-        asyncio.create_task(trading_workflow(parsed_signal))
+        # asyncio.create_task(trading_workflow(parsed_signal))
     else:
         print("Parsed signal is missing required fields. Skipping order.")
         print('------------------------------------------------------------------------------------')
@@ -40,18 +38,18 @@ async def main():
         try:
             print('------------------------------------------------------------------------------------')
             print(f"Starting Telegram listener for channel: {channel_username}")
-            await client.start()  # Restores session and logs in
+            await client.start()
             print("Client started, listening for messages...")
             print('------------------------------------------------------------------------------------')
             
-            # Schedule disconnect after 2 hours (7200 seconds)
+             # Schedule disconnect after 1 hours (3600 seconds)
             async def disconnect_after(delay: int):
                 await asyncio.sleep(delay)
-                print("Auto re-connecting after 2 hour...")
+                print("Scheduled disconnect from Telegram. Reconnecting in 10 seconds...")
                 await client.disconnect()
-            
-            asyncio.create_task(disconnect_after(7200))
-            
+
+            asyncio.create_task(disconnect_after(1600))
+                
             # Run until the client disconnects
             await client.run_until_disconnected()
         except Exception as e:
@@ -59,7 +57,9 @@ async def main():
             await asyncio.sleep(10)
             await client.disconnect()
         else:
+            # Hit after scheduled disconnect
             await asyncio.sleep(10)
+
 
 if __name__ == '__main__':
     # Run the main function in a single event loop
