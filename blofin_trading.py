@@ -53,7 +53,7 @@ async def sign_and_login(ws) -> None:
         }]
     }
     await ws.send(json.dumps(login_payload))
-    response = await ws.recv()
+    await ws.recv()
 
 
 def generate_rest_signature(path: str, method: str, timestamp: str, nonce: str, body: str) -> str:
@@ -110,6 +110,26 @@ def set_leverage(instId: str) -> dict:
 
     return leverage_response
 
+def get_instrument_details(instId: str) -> dict:
+    """
+    Retrieve instrument details from the GET /api/v1/market/instruments endpoint.
+    """
+    url = f"{ROOT_URL}/api/v1/market/instruments"
+    params = {"instId": instId}
+    response = requests.get(url, params=params)
+    response.raise_for_status()
+    data = response.json()
+    if "data" not in data or not data["data"]:
+        raise Exception(f"No instrument data for {instId}")
+    # Return the first instrument matching the instId
+    return data["data"][0]
+
+def round_to_multiple(value: float, multiple: float) -> float:
+    """
+    Round value to the nearest multiple.
+    """
+    return round(round(value / multiple) * multiple, 8)
+
 
 def place_rest_order(signal: dict) -> dict:
     """
@@ -120,8 +140,6 @@ def place_rest_order(signal: dict) -> dict:
     Uses the first target as the take profit price.
     
     The order USD amount and leverage are taken from .env variables.
-    The order size (in tokens) is calculated as:
-        (ORDER_USD_AMOUNT * leverage) / entry_price
     """
     trade_type = signal.get("trade_type", "").upper()
     entries = signal.get("entry", [])
@@ -150,26 +168,43 @@ def place_rest_order(signal: dict) -> dict:
     if not ticker:
         raise Exception("No ticker provided in signal.")
     instId = f"{ticker.upper()}-USDT"
+    
+    # Retrieve instrument details. These are used to determine the amount of "contracts" to buy, and the floating point precision
+    # allowed. The "size" in the order request must be sent in contract size, and contract size is not always 1:1 with a coin. So
+    # arithmetic is requiored to parse the actual order size for the given contract size. 
+    instrument = get_instrument_details(instId)
+    contractValue = float(instrument.get("contractValue", "1"))
+    lotSize = float(instrument.get("lotSize", "1"))
+    tickSize = float(instrument.get("tickSize", "0.0001"))   
 
-    # Calculate order size from desired USD amount and leverage:
+    # Adjust entry price to the nearest tick size:
+    entry_price = round_to_multiple(entry_price, tickSize)
+
+    # Calculate order size (number of contracts):
     usd_amount = float(ORDER_USD_AMOUNT)
     leverage_val = float(LEVERAGE)
     notional = usd_amount * leverage_val
-    order_size = notional / entry_price  # Number of tokens/contracts
-    
+    # Cost per contract in USD:
+    cost_per_contract = entry_price * contractValue
+    order_size = notional / cost_per_contract
+    # Round order_size to the nearest multiple of lotSize:
+    order_size = round_to_multiple(order_size, lotSize)
+
+    # Build the order request payload.
+    # For SL and TP, using "-1" means market execution when triggered.
     order_request = {
         "instId": instId,
-        "marginMode": "cross", 
+        "marginMode": "cross",
         "side": side,
         "orderType": "limit",
         "price": str(entry_price),
-        "size": str(round(order_size, 2)),
+        "size": str(order_size),
         "slTriggerPrice": str(stoploss),
         "slOrderPrice": "-1",
         "tpTriggerPrice": str(take_profit),
         "tpOrderPrice": "-1",
         "leverage": str(int(leverage_val)),
-        "positionSide": "net"
+        "positionSide": "net",
     }
 
     print("Placing order with payload:")
@@ -235,7 +270,6 @@ async def trading_workflow(signal: dict):
         set_leverage(instId)
     except Exception as e:
         raise Exception("Set leverage failed:", e)
-        # Depending on your strategy, you may choose to continue or abort here.
     
     # 2. Connect to WebSocket and authenticate
     ws = await websockets.connect(WS_URL)
@@ -257,7 +291,7 @@ async def trading_workflow(signal: dict):
     # 5. Wait for order confirmation via WebSocket
     try:
         await wait_for_order_confirmation(ws, order_id)
-        print("Order placed.")
+        print("Order placed successfully.")
     except Exception as e:
         print("Order failed: ", e)
     
@@ -267,15 +301,3 @@ async def trading_workflow(signal: dict):
     
     # Clean up WebSocket connection
     await ws.close()
-
-
-if __name__ == "__main__":
-    # Example Telegram signal parsed from a message:
-    telegram_signal = {
-        "ticker": "SOL",
-        "trade_type": "LONG",
-        "entry": [123.99],
-        "targets": [200],
-        "stoploss": 80
-    }
-    asyncio.run(trading_workflow(telegram_signal))
