@@ -42,7 +42,6 @@ async def disconnect_after(delay: int):
 
 async def main():
     while True:
-        print('------------------------------------------------------------------------------------')
         print(f"Starting Telegram listener for channel: {channel_username}")
         await client.start()  # This restores the session and logs in
         print("Client started, listening for messages...")
@@ -53,10 +52,7 @@ async def main():
         # which in turn causes run_until_disconnected() to return.
         await asyncio.gather(
             client.run_until_disconnected(),
-            disconnect_after(7200)
+            disconnect_after(7200) # in seconds
         )
-        print("Scheduled disconnection from Telegram. Waiting 10 seconds before reconnecting...")
+        # Wait ten seconds after scheduled disconnect before reconnecting
         await asyncio.sleep(10)
-
-if __name__ == '__main__':
-    asyncio.run(main())
