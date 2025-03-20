@@ -1,5 +1,6 @@
 import os
 import asyncio
+from datetime import datetime, timezone
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
 from signal_parser import parse_signal
@@ -19,9 +20,17 @@ async def message_handler(event):
     """
     Invoked on new messages in the Telegram Channel.
     """
+
+    # Workaround fixing telethon client sometimes parsing the last two messages when re-starting the server.
+    # Ignores a message if its more than a minute old
+    message_date_utc = event.message.date.astimezone(timezone.utc)
+    if (datetime.now(timezone.utc) - message_date_utc).total_seconds() > 60:
+        print("Ignoring old message")
+        return
+
     message_text = event.message.message
     parsed_signal = parse_signal(message_text)
-    print(f"Parsed Signal from Telegram: {parsed_signal}")
+    print(f"({datetime.now().strftime('%I:%M%p').lstrip('0')}) Parsed Signal from Telegram: {parsed_signal}")
     
     # Validate required fields in the parsed signal
     if (parsed_signal.get('ticker') is not None and 
@@ -38,6 +47,7 @@ async def message_handler(event):
 
 async def disconnect_after(delay: int):
     await asyncio.sleep(delay)
+    print(f"({datetime.now().strftime('%I:%M%p').lstrip('0')}) Scheduled telegram disconnect. Reconnecting in 10 seconds...")
     await client.disconnect()
 
 async def main():
