@@ -29,9 +29,9 @@ def parse_signal(message: str) -> dict:
     message = message.strip()
 
     # Extract the ticker symbol (look for '#' first, then '$' if not found)
-    ticker_match = re.search(r'#([A-Za-z]+)', message)
+    ticker_match = re.search(r'#([A-Za-z0-9]+)', message)
     if not ticker_match:
-        ticker_match = re.search(r'\$([A-Za-z]+)', message)
+        ticker_match = re.search(r'\$([A-Za-z0-9]+)', message)
     data['ticker'] = ticker_match.group(1).upper() if ticker_match else None
 
     # Identify the trade type (LONG or SHORT)
