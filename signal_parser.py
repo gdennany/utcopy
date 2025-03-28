@@ -39,12 +39,12 @@ def parse_signal(message: str) -> dict:
     data['trade_type'] = trade_type_match.group(1).upper() if trade_type_match else None
 
     # Helper function to extract values from lines like "ENTRY:" or "TARGETS:".
-    # For TARGETS, the regex allows an optional 'S' (i.e. "Target:" or "Targets:").
+    # The colon is made optional using :?
     def extract_values(label: str):
         if label.upper() == "TARGETS":
-            pattern = r'TARGETS?:\s*([\d\.\-\s,]+)'
+            pattern = r'TARGETS?:\s*:?\s*([\d\.\-\s,]+)'
         else:
-            pattern = rf'{label}:\s*([\d\.\-\s,]+)'
+            pattern = rf'{label}:?\s*([\d\.\-\s,]+)'
         match = re.search(pattern, message, re.IGNORECASE)
         if match:
             values = match.group(1).strip()
@@ -54,8 +54,8 @@ def parse_signal(message: str) -> dict:
     data['entry'] = extract_values("ENTRY")
     data['targets'] = extract_values("TARGETS")
     
-    # Extract the stoploss value
-    stoploss_match = re.search(r'STOPLOSS:\s*([\d\.]+)', message, re.IGNORECASE)
+    # Extract the stoploss value with an optional colon
+    stoploss_match = re.search(r'STOPLOSS:?\s*([\d\.]+)', message, re.IGNORECASE)
     data['stoploss'] = float(stoploss_match.group(1)) if stoploss_match else None
 
     return data
