@@ -294,7 +294,7 @@ async def trading_workflow(signal: dict):
         print("Order placed successfully.")
     except Exception as e:
         print("Order failed: ", e)
-    
+
     print('------------------------------------------------------------------------------------')
     
     # (Optional) 6. Order cancellation logic.
