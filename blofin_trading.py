@@ -190,15 +190,26 @@ def place_rest_order(signal: dict) -> dict:
     # Round order_size to the nearest multiple of lotSize:
     order_size = round_to_multiple(order_size, lotSize)
 
-    # Build the order request payload.
-    # For SL and TP, using "-1" means market execution when triggered.
-    order_request = {
+    # Split position into two legs for partial TP behavior.
+    # Leg A: 50% size with TP at first target and SL (market on trigger)
+    # Leg B: remaining size with SL only (no TP)
+
+    # Compute half sizes respecting lot size increments. Ensure we do not end up with zero-size legs.
+    half_size = round_to_multiple(order_size / 2.0, lotSize)
+    if half_size <= 0:
+        half_size = order_size
+    remaining_size = round_to_multiple(order_size - half_size, lotSize)
+    if remaining_size < 0:
+        remaining_size = 0
+
+    # Build payload for Leg A (with TP and SL)
+    order_request_with_tp = {
         "instId": instId,
         "marginMode": "cross",
         "side": side,
         "orderType": "limit",
         "price": str(entry_price),
-        "size": str(order_size),
+        "size": str(half_size),
         "slTriggerPrice": str(stoploss),
         "slOrderPrice": "-1",
         "tpTriggerPrice": str(take_profit),
@@ -207,36 +218,76 @@ def place_rest_order(signal: dict) -> dict:
         "positionSide": "net",
     }
 
-    print("Placing order with payload:")
-    print(json.dumps(order_request, indent=2))
+    print("Placing order (50% with TP) with payload:")
+    print(json.dumps(order_request_with_tp, indent=2))
 
-    body = json.dumps(order_request)
     path = "/api/v1/trade/order"
     method = "POST"
-    timestamp = str(int(time.time() * 1000))
-    nonce = timestamp  # Using timestamp as nonce for simplicity
-    signature = generate_rest_signature(path, method, timestamp, nonce, body)
+    url = ROOT_URL + path
 
-    headers = {
+    # Sign and send Leg A
+    body_a = json.dumps(order_request_with_tp)
+    timestamp_a = str(int(time.time() * 1000))
+    nonce_a = timestamp_a
+    signature_a = generate_rest_signature(path, method, timestamp_a, nonce_a, body_a)
+    headers_a = {
         "ACCESS-KEY": API_KEY,
-        "ACCESS-SIGN": signature,
-        "ACCESS-TIMESTAMP": timestamp,
-        "ACCESS-NONCE": nonce,
+        "ACCESS-SIGN": signature_a,
+        "ACCESS-TIMESTAMP": timestamp_a,
+        "ACCESS-NONCE": nonce_a,
         "ACCESS-PASSPHRASE": PASSPHRASE,
         "Content-Type": "application/json"
     }
+    response_a = requests.post(url, headers=headers_a, json=order_request_with_tp)
+    response_a.raise_for_status()
+    order_response_a = response_a.json()
+    if "code" in order_response_a and order_response_a["code"] != "0":
+        raise Exception(f"Order API error (leg A): {order_response_a}")
+    if "data" not in order_response_a:
+        raise Exception(f"No data in order response (leg A): {order_response_a}")
 
-    url = ROOT_URL + path
-    response = requests.post(url, headers=headers, json=order_request)
-    response.raise_for_status()
-    order_response = response.json()
-    
-    if "code" in order_response and order_response["code"] != "0":
-        raise Exception(f"Order API error: {order_response}")
-    if "data" not in order_response:
-        raise Exception(f"No data in order response: {order_response}")
+    # If there is remaining size, place Leg B (SL only)
+    if remaining_size > 0:
+        order_request_sl_only = {
+            "instId": instId,
+            "marginMode": "cross",
+            "side": side,
+            "orderType": "limit",
+            "price": str(entry_price),
+            "size": str(remaining_size),
+            "slTriggerPrice": str(stoploss),
+            "slOrderPrice": "-1",
+            # No TP for this leg
+            "leverage": str(int(leverage_val)),
+            "positionSide": "net",
+        }
 
-    return order_response
+        print("Placing order (remaining with SL only) with payload:")
+        print(json.dumps(order_request_sl_only, indent=2))
+
+        body_b = json.dumps(order_request_sl_only)
+        timestamp_b = str(int(time.time() * 1000))
+        nonce_b = timestamp_b
+        signature_b = generate_rest_signature(path, method, timestamp_b, nonce_b, body_b)
+        headers_b = {
+            "ACCESS-KEY": API_KEY,
+            "ACCESS-SIGN": signature_b,
+            "ACCESS-TIMESTAMP": timestamp_b,
+            "ACCESS-NONCE": nonce_b,
+            "ACCESS-PASSPHRASE": PASSPHRASE,
+            "Content-Type": "application/json"
+        }
+        response_b = requests.post(url, headers=headers_b, json=order_request_sl_only)
+        response_b.raise_for_status()
+        order_response_b = response_b.json()
+        if "code" in order_response_b and order_response_b["code"] != "0":
+            raise Exception(f"Order API error (leg B): {order_response_b}")
+
+    # Return list of created order IDs for downstream confirmation waits
+    order_ids = [order_response_a["data"][0]["orderId"]]
+    if remaining_size > 0:
+        order_ids.append(order_response_b["data"][0]["orderId"])  # type: ignore[name-defined]
+    return order_ids
 
 
 async def wait_for_order_confirmation(ws, order_id: str, timeout: int = 10) -> dict:
@@ -255,6 +306,38 @@ async def wait_for_order_confirmation(ws, order_id: str, timeout: int = 10) -> d
         return order_update
     except asyncio.TimeoutError:
         raise Exception("Timeout waiting for order confirmation.")
+
+
+async def wait_for_multiple_order_confirmations(ws, order_ids, timeout: int = 10) -> dict:
+    """
+    Wait for confirmations for all order_ids using a single receiver loop.
+    Returns a mapping of order_id -> order update payload.
+    """
+    remaining = set(order_ids)
+    found = {}
+
+    async def listen_one():
+        data = json.loads(await ws.recv())
+        if data.get("action") == "update":
+            for order in data.get("data", []):
+                oid = order.get("orderId")
+                if oid in remaining:
+                    found[oid] = order
+                    remaining.discard(oid)
+
+    try:
+        deadline = asyncio.get_event_loop().time() + timeout
+        while remaining:
+            time_left = deadline - asyncio.get_event_loop().time()
+            if time_left <= 0:
+                missing = ", ".join(list(remaining))
+                raise Exception(f"Timeout waiting for confirmations for: {missing}")
+            per_wait = min(1.0, time_left)
+            await asyncio.wait_for(listen_one(), timeout=per_wait)
+        return found
+    except asyncio.TimeoutError:
+        missing = ", ".join(list(remaining))
+        raise Exception(f"Timeout waiting for confirmations for: {missing}")
 
 
 async def trading_workflow(signal: dict):
@@ -284,16 +367,17 @@ async def trading_workflow(signal: dict):
     await ws.send(json.dumps(subscribe_payload))
     await ws.recv()
     
-    # 4. Place limit order via REST using the signal details
-    order_response = place_rest_order(signal)
-    order_id = order_response["data"][0]["orderId"]
+    # 4. Place limit order(s) via REST using the signal details
+    order_ids = place_rest_order(signal)
     
-    # 5. Wait for order confirmation via WebSocket
+    # 5. Wait for confirmations for all created orders via WebSocket
     try:
-        await wait_for_order_confirmation(ws, order_id)
-        print("Order placed successfully.")
+        confirmations = await wait_for_multiple_order_confirmations(ws, order_ids)
+        print("Orders placed successfully:")
+        for oid in order_ids:
+            print(f" - {oid}: {confirmations.get(oid, {})}")
     except Exception as e:
-        print("Order failed: ", e)
+        print("Order confirmation failed: ", e)
 
     print('------------------------------------------------------------------------------------')
     
